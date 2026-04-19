@@ -8,12 +8,10 @@ import pandas as pd
 
 def normalize_option_chain(payload: dict[str, Any], captured_at: datetime) -> pd.DataFrame:
     records: list[dict[str, Any]] = []
-    symbol = payload.get("records", {}).get("underlying")
     timestamp = payload.get("records", {}).get("timestamp")
     data = payload.get("records", {}).get("data", [])
 
     for entry in data:
-        expiry = entry.get("expiryDate")
         strike = entry.get("strikePrice")
         for option_type in ("CE", "PE"):
             leg = entry.get(option_type)
@@ -23,8 +21,8 @@ def normalize_option_chain(payload: dict[str, Any], captured_at: datetime) -> pd
                 {
                     "captured_at": captured_at.isoformat(),
                     "exchange_timestamp": timestamp,
-                    "symbol": symbol,
-                    "expiry": expiry,
+                    "symbol": leg.get("underlying"),
+                    "expiry": leg.get("expiryDate"),
                     "strike_price": strike,
                     "option_type": option_type,
                     "open_interest": leg.get("openInterest"),
@@ -34,11 +32,13 @@ def normalize_option_chain(payload: dict[str, Any], captured_at: datetime) -> pd
                     "implied_volatility": leg.get("impliedVolatility"),
                     "last_price": leg.get("lastPrice"),
                     "change": leg.get("change"),
-                    "pchange": leg.get("pChange"),
-                    "bid_qty": leg.get("bidQty"),
-                    "bid_price": leg.get("bidprice"),
-                    "ask_qty": leg.get("askQty"),
-                    "ask_price": leg.get("askPrice"),
+                    "pchange": leg.get("pchange"),
+                    "bid_qty": leg.get("buyQuantity1"),
+                    "bid_price": leg.get("buyPrice1"),
+                    "ask_qty": leg.get("sellQuantity1"),
+                    "ask_price": leg.get("sellPrice1"),
+                    "total_buy_quantity": leg.get("totalBuyQuantity"),
+                    "total_sell_quantity": leg.get("totalSellQuantity"),
                     "underlying_value": leg.get("underlyingValue"),
                 }
             )

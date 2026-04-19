@@ -7,7 +7,9 @@ from typing import Any
 import requests
 
 NSE_BASE = "https://www.nseindia.com"
-OPTION_CHAIN_API = f"{NSE_BASE}/api/option-chain-indices"
+OPTION_CHAIN_PAGE = f"{NSE_BASE}/option-chain?date=select&instrument=OPTIDX&segmentLink=17&symbol=NIFTY"
+OPTION_CHAIN_CONTRACT_INFO = f"{NSE_BASE}/api/option-chain-contract-info"
+OPTION_CHAIN_V3 = f"{NSE_BASE}/api/option-chain-v3"
 DEFAULT_TIMEOUT = 20
 
 
@@ -32,7 +34,7 @@ class NSEOptionChainClient:
                 ),
                 "accept": "application/json,text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
                 "accept-language": "en-US,en;q=0.9",
-                "referer": f"{NSE_BASE}/option-chain",
+                "referer": OPTION_CHAIN_PAGE,
                 "cache-control": "no-cache",
                 "pragma": "no-cache",
                 "connection": "keep-alive",
@@ -41,11 +43,19 @@ class NSEOptionChainClient:
         self._bootstrapped = False
 
     def bootstrap(self) -> None:
-        response = self.session.get(f"{NSE_BASE}/option-chain", timeout=self.config.timeout)
+        response = self.session.get(OPTION_CHAIN_PAGE, timeout=self.config.timeout)
         response.raise_for_status()
         self._bootstrapped = True
 
-    def fetch_option_chain(self, symbol: str | None = None) -> dict[str, Any]:
+    def _get_json(self, url: str, **params: Any) -> dict[str, Any]:
+        response = self.session.get(url, params=params or None, timeout=self.config.timeout)
+        response.raise_for_status()
+        payload = response.json()
+        if not isinstance(payload, dict):
+            raise ValueError(f"Unexpected NSE payload type: {type(payload).__name__}")
+        return payload
+
+    def fetch_option_chain(self, symbol: str | None = None, expiry: str | None = None) -> dict[str, Any]:
         if not self._bootstrapped:
             self.bootstrap()
 
@@ -54,22 +64,27 @@ class NSEOptionChainClient:
 
         for attempt in range(1, self.config.max_retries + 1):
             try:
-                response = self.session.get(
-                    OPTION_CHAIN_API,
-                    params={"symbol": symbol},
-                    timeout=self.config.timeout,
+                if expiry is None:
+                    contract_info = self._get_json(OPTION_CHAIN_CONTRACT_INFO, symbol=symbol)
+                    expiry_dates = contract_info.get("expiryDates") or []
+                    if expiry_dates:
+                        expiry = expiry_dates[0]
+                    else:
+                        raise ValueError(f"No expiry dates returned for symbol {symbol}")
+
+                payload = self._get_json(
+                    OPTION_CHAIN_V3,
+                    type="Indices" if symbol in {"NIFTY", "FINNIFTY", "BANKNIFTY", "MIDCPNIFTY", "NIFTYNXT50"} else "Equity",
+                    symbol=symbol,
+                    expiry=expiry,
                 )
 
-                if response.status_code in {401, 403}:
-                    self.bootstrap()
-                    response = self.session.get(
-                        OPTION_CHAIN_API,
-                        params={"symbol": symbol},
-                        timeout=self.config.timeout,
+                if payload == {}:
+                    raise ValueError(
+                        f"Empty NSE payload returned for symbol {symbol} and expiry {expiry}"
                     )
 
-                response.raise_for_status()
-                return response.json()
+                return payload
             except Exception as exc:
                 last_error = exc
                 if attempt < self.config.max_retries:

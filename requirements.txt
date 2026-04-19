@@ -1,0 +1,6 @@
+requests
+pandas
+fastapi
+uvicorn[standard]
+pydantic
+google-cloud-storage

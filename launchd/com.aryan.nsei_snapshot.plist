@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.aryan.nsei-snapshot</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/zsh</string>
+    <string>-lc</string>
+    <string>cd "/Users/aryanayyar/Library/CloudStorage/GoogleDrive-aryan.ayyar.learner@gmail.com/My Drive/Data/NSEI/NSEI_Snapshot" && exec "$PWD/.venv/bin/python" scripts/run_option_chain_day.py --symbol NIFTY --symbol BANKNIFTY --symbol FINNIFTY</string>
+  </array>
+  <key>StartCalendarInterval</key>
+  <array>
+    <dict>
+      <key>Weekday</key>
+      <integer>2</integer>
+      <key>Hour</key>
+      <integer>9</integer>
+      <key>Minute</key>
+      <integer>15</integer>
+    </dict>
+    <dict>
+      <key>Weekday</key>
+      <integer>3</integer>
+      <key>Hour</key>
+      <integer>9</integer>
+      <key>Minute</key>
+      <integer>15</integer>
+    </dict>
+    <dict>
+      <key>Weekday</key>
+      <integer>4</integer>
+      <key>Hour</key>
+      <integer>9</integer>
+      <key>Minute</key>
+      <integer>15</integer>
+    </dict>
+    <dict>
+      <key>Weekday</key>
+      <integer>5</integer>
+      <key>Hour</key>
+      <integer>9</integer>
+      <key>Minute</key>
+      <integer>15</integer>
+    </dict>
+    <dict>
+      <key>Weekday</key>
+      <integer>6</integer>
+      <key>Hour</key>
+      <integer>9</integer>
+      <key>Minute</key>
+      <integer>15</integer>
+    </dict>
+  </array>
+  <key>StandardOutPath</key>
+  <string>/Users/aryanayyar/Library/CloudStorage/GoogleDrive-aryan.ayyar.learner@gmail.com/My Drive/Data/NSEI/NSEI_Snapshot/logs/launchd.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/aryanayyar/Library/CloudStorage/GoogleDrive-aryan.ayyar.learner@gmail.com/My Drive/Data/NSEI/NSEI_Snapshot/logs/launchd.err.log</string>
+</dict>
+</plist>

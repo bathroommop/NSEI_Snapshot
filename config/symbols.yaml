@@ -2,5 +2,5 @@ symbols:
   - NIFTY
 poll_interval_seconds: 60
 market_hours:
-  start: "09:14"
-  end: "15:31"
+  start: "09:00"
+  end: "15:30"
