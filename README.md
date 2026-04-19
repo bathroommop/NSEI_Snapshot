@@ -2,11 +2,10 @@
 
 A small **Next.js** dashboard for the **NSEI Snapshot** HTTP API: health, available dates, per-day file listings, **realtime** option rows for a symbol, and **CSV** downloads. The UI is a two-pane layout (data table on the left, controls on the right) and keeps the upstream **API key on the server** when you use the built-in proxy.
 
-On GitHub, the [`Frontend`](https://github.com/bathroommop/NSEI_Snapshot/tree/Frontend) branch of [`bathroommop/NSEI_Snapshot`](https://github.com/bathroommop/NSEI_Snapshot) is this app only, at the repository root.
+The [`Frontend`](https://github.com/bathroommop/NSEI_Snapshot/tree/Frontend) branch of [`bathroommop/NSEI_Snapshot`](https://github.com/bathroommop/NSEI_Snapshot) mirrors this project at the repository root (no extra folder).
 
 ## Features
 
-- **Health** check against `GET /health`.
 - **Dates** from `GET /v1/dates` with quick selection.
 - **Files** for the selected date from `GET /v1/files?date=…`, plus symbol chips that drive the realtime view.
 - **Realtime** option chain from `GET /v1/realtime/{symbol}`: sticky header, numeric alignment, and signed coloring on selected columns.
