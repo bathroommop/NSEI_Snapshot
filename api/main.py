@@ -74,6 +74,13 @@ class RealtimeSnapshot(BaseModel):
     date: str
     symbol: str
     captured_at: str
+    row_count: int
+    expiry_count: int
+    expiries: list[str]
+    strike_count: int
+    underlying_value: float | None
+    pcr_oi: float | None
+    pcr_volume: float | None
     rows: list[dict]
 
 
@@ -268,6 +275,30 @@ def fetch_live_snapshot_rows(symbol: str, expiry: str) -> tuple[str, str, list[d
     return (datetime.utcnow().date().isoformat(), captured, out_rows)
 
 
+def compute_snapshot_meta(rows: list[dict]) -> dict[str, object]:
+    expiries = sorted({str(row.get("expiry")) for row in rows if row.get("expiry")})
+    strikes = {row.get("strike_price") for row in rows if row.get("strike_price") is not None}
+    underlying = next(
+        (row.get("underlying_value") for row in rows if row.get("underlying_value") is not None),
+        None,
+    )
+    call_oi = sum(float(row.get("open_interest") or 0) for row in rows if row.get("option_type") == "CE")
+    put_oi = sum(float(row.get("open_interest") or 0) for row in rows if row.get("option_type") == "PE")
+    call_volume = sum(float(row.get("total_traded_volume") or 0) for row in rows if row.get("option_type") == "CE")
+    put_volume = sum(float(row.get("total_traded_volume") or 0) for row in rows if row.get("option_type") == "PE")
+    pcr_oi = round(put_oi / call_oi, 4) if call_oi > 0 else None
+    pcr_volume = round(put_volume / call_volume, 4) if call_volume > 0 else None
+    return {
+        "row_count": len(rows),
+        "expiry_count": len(expiries),
+        "expiries": expiries,
+        "strike_count": len(strikes),
+        "underlying_value": float(underlying) if underlying is not None else None,
+        "pcr_oi": pcr_oi,
+        "pcr_volume": pcr_volume,
+    }
+
+
 @app.get("/v1/dates", dependencies=[Depends(require_api_key)])
 def list_dates() -> dict[str, list[str]]:
     bucket = gcs_bucket_name()
@@ -384,7 +415,8 @@ def realtime_snapshot(symbol: str, expiry: str | None = None) -> RealtimeSnapsho
         live_date, live_capture, live_rows = fetch_live_snapshot_rows(symbol, expiry)
         if not live_rows:
             raise HTTPException(status_code=404, detail="No data found for symbol/expiry")
-        return RealtimeSnapshot(date=live_date, symbol=symbol, captured_at=live_capture, rows=live_rows)
+        meta = compute_snapshot_meta(live_rows)
+        return RealtimeSnapshot(date=live_date, symbol=symbol, captured_at=live_capture, rows=live_rows, **meta)
     if filtered_frame.empty:
         raise HTTPException(status_code=404, detail="No data found for symbol/expiry")
 
@@ -395,7 +427,8 @@ def realtime_snapshot(symbol: str, expiry: str | None = None) -> RealtimeSnapsho
     if "strike_price" in rows_frame.columns and "option_type" in rows_frame.columns:
         rows_frame = rows_frame.sort_values(by=["strike_price", "option_type"], kind="stable")
     rows = rows_frame.to_dict(orient="records")
-    return RealtimeSnapshot(date=latest_date, symbol=symbol, captured_at=latest_capture, rows=rows)
+    meta = compute_snapshot_meta(rows)
+    return RealtimeSnapshot(date=latest_date, symbol=symbol, captured_at=latest_capture, rows=rows, **meta)
 
 
 @app.get("/v1/download-range/{symbol}.csv", dependencies=[Depends(require_api_key)], response_model=None)
