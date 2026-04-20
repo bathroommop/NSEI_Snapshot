@@ -8,8 +8,8 @@ The [`Frontend`](https://github.com/bathroommop/NSEI_Snapshot/tree/Frontend) bra
 
 - **Dates** from `GET /v1/dates` with quick selection.
 - **Files** for the selected date from `GET /v1/files?date=…`, plus symbol chips that drive the realtime view.
-- **Realtime** option chain from `GET /v1/realtime/{symbol}`: sticky header, numeric alignment, and signed coloring on selected columns.
-- **CSV exports** via the same proxy: single-day file and week/month range downloads.
+- **Realtime** option chain from `GET /v1/realtime/{symbol}` with optional expiry filter from `GET /v1/expiries/{symbol}`.
+- **CSV exports** via the same proxy: single-day file and week/month range downloads, with optional expiry filter for range exports.
 - **Readable errors**: API JSON errors (for example `detail` from FastAPI-style responses) are turned into short messages such as **No data available** or **Not authorized** instead of raw JSON in the UI.
 
 ## Stack
@@ -70,9 +70,10 @@ Authoritative contract documentation may live alongside your backend (for exampl
 | `GET /health` | Liveness |
 | `GET /v1/dates` | List of `YYYY-MM-DD` dates with data |
 | `GET /v1/files?date=…` | Symbols / filenames for that date |
-| `GET /v1/realtime/{symbol}` | Latest snapshot rows for the symbol |
+| `GET /v1/expiries/{symbol}` | Available expiries for the symbol |
+| `GET /v1/realtime/{symbol}?expiry=DD-MMM-YYYY` | Latest snapshot rows for the symbol (optionally narrowed by expiry) |
 | `GET /v1/download/{date}/{symbol}.csv` | One symbol, one day CSV |
-| `GET /v1/download-range/{symbol}.csv?period=day\|week\|month&anchor_date=…` | Merged range CSV |
+| `GET /v1/download-range/{symbol}.csv?period=day\|week\|month&anchor_date=…&expiry=DD-MMM-YYYY` | Range export (single CSV for day, ZIP for week/month) |
 
 From the browser, prefix paths with **`/api/nsei`** (the client helpers in `lib/nsei.ts` already do this).
 

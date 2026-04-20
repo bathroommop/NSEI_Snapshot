@@ -6,34 +6,46 @@ export type FilesResponse = {
   files: { symbol: string; name: string }[];
 };
 
+export type ExpiriesResponse = {
+  symbol: string;
+  expiries: string[];
+};
+
 export type RealtimeRow = {
   captured_at: string;
   exchange_timestamp: string;
   symbol: string;
   expiry: string;
   strike_price: number;
-  option_type: string;
-  open_interest: number;
-  change_in_oi: number;
-  pchange_in_oi: number;
-  total_traded_volume: number;
-  implied_volatility: number;
-  last_price: number;
-  change: number;
-  pchange: number;
-  bid_qty: number;
-  bid_price: number;
-  ask_qty: number;
-  ask_price: number;
-  total_buy_quantity: number;
-  total_sell_quantity: number;
-  underlying_value: number;
+  option_type: "CE" | "PE";
+  open_interest: number | null;
+  change_in_oi: number | null;
+  pchange_in_oi: number | null;
+  total_traded_volume: number | null;
+  implied_volatility: number | null;
+  last_price: number | null;
+  change: number | null;
+  pchange: number | null;
+  bid_qty: number | null;
+  bid_price: number | null;
+  ask_qty: number | null;
+  ask_price: number | null;
+  total_buy_quantity: number | null;
+  total_sell_quantity: number | null;
+  underlying_value: number | null;
 };
 
 export type RealtimeResponse = {
   date: string;
   symbol: string;
   captured_at: string;
+  row_count: number;
+  expiry_count: number;
+  expiries: string[];
+  strike_count: number;
+  underlying_value: number | null;
+  pcr_oi: number | null;
+  pcr_volume: number | null;
   rows: RealtimeRow[];
 };
 
@@ -74,14 +86,17 @@ export async function fetchNseiJson<T>(path: string): Promise<T> {
 
 export function nseiDownloadUrl(
   kind: "day" | "range",
-  args: { date: string; symbol: string } | { symbol: string; period: string; anchor_date?: string }
+  args:
+    | { date: string; symbol: string }
+    | { symbol: string; period: string; anchor_date?: string; expiry?: string }
 ) {
   if (kind === "day") {
     const a = args as { date: string; symbol: string };
     return `${prefix}/v1/download/${a.date}/${a.symbol}.csv`;
   }
-  const a = args as { symbol: string; period: string; anchor_date?: string };
+  const a = args as { symbol: string; period: string; anchor_date?: string; expiry?: string };
   const q = new URLSearchParams({ period: a.period });
   if (a.anchor_date) q.set("anchor_date", a.anchor_date);
+  if (a.expiry) q.set("expiry", a.expiry);
   return `${prefix}/v1/download-range/${a.symbol}.csv?${q.toString()}`;
 }
