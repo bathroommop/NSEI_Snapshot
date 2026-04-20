@@ -49,6 +49,7 @@ app = FastAPI(title="NSEI snapshot API")
 NSE_BASE = "https://www.nseindia.com"
 OPTION_CHAIN_PAGE = f"{NSE_BASE}/option-chain?date=select&instrument=OPTIDX&segmentLink=17&symbol=NIFTY"
 OPTION_CHAIN_CONTRACT_INFO = f"{NSE_BASE}/api/option-chain-contract-info"
+OPTION_CHAIN_V3 = f"{NSE_BASE}/api/option-chain-v3"
 NSE_HEADERS = {
     "user-agent": (
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
@@ -197,6 +198,76 @@ def fetch_exchange_expiries(symbol: str) -> list[str]:
     return [str(item) for item in expiry_dates if str(item).strip()]
 
 
+def resolve_exchange_expiry(symbol: str, expiry: str) -> str | None:
+    target = normalize_expiry_value(expiry)
+    for item in fetch_exchange_expiries(symbol):
+        if normalize_expiry_value(item) == target:
+            return item
+    return None
+
+
+def fetch_live_snapshot_rows(symbol: str, expiry: str) -> tuple[str, str, list[dict]]:
+    resolved_expiry = resolve_exchange_expiry(symbol, expiry) or expiry
+    session = requests.Session()
+    session.headers.update(NSE_HEADERS)
+    try:
+        bootstrap = session.get(OPTION_CHAIN_PAGE, timeout=20)
+        bootstrap.raise_for_status()
+        response = session.get(
+            OPTION_CHAIN_V3,
+            params={
+                "type": "Indices" if symbol in {"NIFTY", "FINNIFTY", "BANKNIFTY", "MIDCPNIFTY", "NIFTYNXT50"} else "Equity",
+                "symbol": symbol,
+                "expiry": resolved_expiry,
+            },
+            timeout=20,
+        )
+        response.raise_for_status()
+        payload = response.json()
+    except requests.RequestException as exc:
+        raise HTTPException(status_code=502, detail="Failed to fetch live option chain from NSE") from exc
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=502, detail="Invalid live option payload from NSE")
+
+    records = payload.get("records") or {}
+    timestamp = str(records.get("timestamp") or datetime.utcnow().isoformat())
+    data = records.get("data") or []
+    captured = datetime.utcnow().isoformat()
+    out_rows: list[dict] = []
+    for entry in data:
+        strike = entry.get("strikePrice")
+        for option_type in ("CE", "PE"):
+            leg = entry.get(option_type)
+            if not leg:
+                continue
+            out_rows.append(
+                {
+                    "captured_at": captured,
+                    "exchange_timestamp": timestamp,
+                    "symbol": leg.get("underlying") or symbol,
+                    "expiry": leg.get("expiryDate") or resolved_expiry,
+                    "strike_price": strike,
+                    "option_type": option_type,
+                    "open_interest": leg.get("openInterest"),
+                    "change_in_oi": leg.get("changeinOpenInterest"),
+                    "pchange_in_oi": leg.get("pchangeinOpenInterest"),
+                    "total_traded_volume": leg.get("totalTradedVolume"),
+                    "implied_volatility": leg.get("impliedVolatility"),
+                    "last_price": leg.get("lastPrice"),
+                    "change": leg.get("change"),
+                    "pchange": leg.get("pchange"),
+                    "bid_qty": leg.get("buyQuantity1"),
+                    "bid_price": leg.get("buyPrice1"),
+                    "ask_qty": leg.get("sellQuantity1"),
+                    "ask_price": leg.get("sellPrice1"),
+                    "total_buy_quantity": leg.get("totalBuyQuantity"),
+                    "total_sell_quantity": leg.get("totalSellQuantity"),
+                    "underlying_value": leg.get("underlyingValue"),
+                }
+            )
+    return (datetime.utcnow().date().isoformat(), captured, out_rows)
+
+
 @app.get("/v1/dates", dependencies=[Depends(require_api_key)])
 def list_dates() -> dict[str, list[str]]:
     bucket = gcs_bucket_name()
@@ -309,6 +380,11 @@ def realtime_snapshot(symbol: str, expiry: str | None = None) -> RealtimeSnapsho
     filtered_frame = latest_frame
     if expiry is not None:
         filtered_frame = filter_frame_by_expiry(latest_frame, expiry)
+    if filtered_frame.empty and expiry is not None:
+        live_date, live_capture, live_rows = fetch_live_snapshot_rows(symbol, expiry)
+        if not live_rows:
+            raise HTTPException(status_code=404, detail="No data found for symbol/expiry")
+        return RealtimeSnapshot(date=live_date, symbol=symbol, captured_at=live_capture, rows=live_rows)
     if filtered_frame.empty:
         raise HTTPException(status_code=404, detail="No data found for symbol/expiry")
 
