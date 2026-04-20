@@ -55,6 +55,22 @@ class NSEOptionChainClient:
             raise ValueError(f"Unexpected NSE payload type: {type(payload).__name__}")
         return payload
 
+    def list_expiries(self, symbol: str | None = None) -> list[str]:
+        if not self._bootstrapped:
+            self.bootstrap()
+        symbol = symbol or self.config.symbol
+        contract_info = self._get_json(OPTION_CHAIN_CONTRACT_INFO, symbol=symbol)
+        expiry_dates = contract_info.get("expiryDates") or []
+        expiries: list[str] = []
+        seen: set[str] = set()
+        for value in expiry_dates:
+            key = str(value).strip()
+            if not key or key in seen:
+                continue
+            expiries.append(key)
+            seen.add(key)
+        return expiries
+
     def fetch_option_chain(self, symbol: str | None = None, expiry: str | None = None) -> dict[str, Any]:
         if not self._bootstrapped:
             self.bootstrap()
@@ -96,3 +112,37 @@ class NSEOptionChainClient:
 
         assert last_error is not None
         raise last_error
+
+    def fetch_option_chain_multi_expiry(self, symbol: str | None = None, expiries: list[str] | None = None) -> dict[str, Any]:
+        symbol = symbol or self.config.symbol
+        expiry_list = expiries or self.list_expiries(symbol=symbol)
+        if not expiry_list:
+            raise ValueError(f"No expiry dates returned for symbol {symbol}")
+
+        merged_payload: dict[str, Any] | None = None
+        merged_rows: list[dict[str, Any]] = []
+        seen: set[tuple[Any, Any]] = set()
+
+        for expiry in expiry_list:
+            payload = self.fetch_option_chain(symbol=symbol, expiry=expiry)
+            if merged_payload is None:
+                merged_payload = payload
+            rows = payload.get("records", {}).get("data") or []
+            for row in rows:
+                strike = row.get("strikePrice")
+                ce = row.get("CE") or {}
+                pe = row.get("PE") or {}
+                row_expiry = ce.get("expiryDate") or pe.get("expiryDate") or expiry
+                key = (row_expiry, strike)
+                if key in seen:
+                    continue
+                merged_rows.append(row)
+                seen.add(key)
+
+        if merged_payload is None:
+            raise ValueError(f"Empty NSE payload returned for symbol {symbol}")
+        if "records" not in merged_payload or not isinstance(merged_payload.get("records"), dict):
+            raise ValueError(f"Unexpected merged payload shape for symbol {symbol}")
+        merged_payload["records"]["data"] = merged_rows
+        merged_payload["records"]["expiryDates"] = expiry_list
+        return merged_payload

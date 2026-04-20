@@ -18,7 +18,14 @@ def collect_option_chain_snapshot(base_dir: str | Path, symbol: str = "NIFTY") -
     captured_at = datetime.now()
     client = NSEOptionChainClient()
     cached_expiry = read_cached_expiry(base_path, symbol)
-    payload = client.fetch_option_chain(symbol=symbol, expiry=cached_expiry)
+    payload: dict[str, Any]
+    try:
+        expiries = client.list_expiries(symbol=symbol)
+        if cached_expiry and cached_expiry in expiries:
+            expiries = [cached_expiry] + [item for item in expiries if item != cached_expiry]
+        payload = client.fetch_option_chain_multi_expiry(symbol=symbol, expiries=expiries)
+    except Exception:
+        payload = client.fetch_option_chain(symbol=symbol, expiry=cached_expiry)
     raw_path, csv_path = snapshot_paths(base_path, symbol=symbol, captured_at=captured_at)
     write_raw_json(raw_path, payload)
 
@@ -35,15 +42,13 @@ def collect_option_chain_snapshot(base_dir: str | Path, symbol: str = "NIFTY") -
     write_daily_csv(csv_path, frame)
     validate_daily_csv(csv_path)
 
-    expiry = None
+    expiry = cached_expiry
     records = payload.get("records", {})
     data = records.get("data") or []
     if data:
         first = data[0]
-        expiry = first.get("expiryDates")
-        if not expiry:
-            leg = first.get("CE") or first.get("PE") or {}
-            expiry = leg.get("expiryDate")
+        leg = first.get("CE") or first.get("PE") or {}
+        expiry = leg.get("expiryDate")
     if expiry:
         write_cached_expiry(base_path, symbol, str(expiry))
 

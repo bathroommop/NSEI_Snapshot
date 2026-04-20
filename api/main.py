@@ -4,6 +4,7 @@ import io
 import os
 from datetime import date, datetime, timedelta
 from pathlib import Path
+import re
 import zipfile
 
 from fastapi import Depends, FastAPI, Header, HTTPException
@@ -90,6 +91,37 @@ def parse_iso_date(value: str) -> date:
         return date.fromisoformat(value)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail="Invalid date format. Use YYYY-MM-DD") from exc
+
+
+def normalize_expiry_value(value: object) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, float) and pd.isna(value):
+        return ""
+    raw = str(value).strip()
+    if not raw:
+        return ""
+    compact = re.sub(r"\s+", "", raw)
+    for fmt in ("%d-%b-%Y", "%d-%B-%Y", "%d-%m-%Y", "%d/%m/%Y", "%d %b %Y", "%d %B %Y"):
+        try:
+            return datetime.strptime(raw, fmt).date().isoformat()
+        except ValueError:
+            pass
+        try:
+            return datetime.strptime(compact, fmt).date().isoformat()
+        except ValueError:
+            pass
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", raw):
+        return raw
+    return compact.upper()
+
+
+def filter_frame_by_expiry(frame: pd.DataFrame, expiry: str) -> pd.DataFrame:
+    if "expiry" not in frame.columns:
+        return frame.iloc[0:0]
+    target = normalize_expiry_value(expiry)
+    normalized = frame["expiry"].astype(str).map(normalize_expiry_value)
+    return frame[normalized == target]
 
 
 def iter_period_dates(period: str, anchor: date) -> list[str]:
@@ -274,12 +306,18 @@ def realtime_snapshot(symbol: str, expiry: str | None = None) -> RealtimeSnapsho
     if "captured_at" not in latest_frame.columns:
         raise HTTPException(status_code=500, detail="captured_at column missing")
 
-    latest_capture = str(latest_frame["captured_at"].max())
-    rows_frame = latest_frame[latest_frame["captured_at"] == latest_capture]
+    filtered_frame = latest_frame
     if expiry is not None:
-        rows_frame = rows_frame[rows_frame["expiry"].astype(str) == expiry]
+        filtered_frame = filter_frame_by_expiry(latest_frame, expiry)
+    if filtered_frame.empty:
+        raise HTTPException(status_code=404, detail="No data found for symbol/expiry")
+
+    latest_capture = str(filtered_frame["captured_at"].max())
+    rows_frame = filtered_frame[filtered_frame["captured_at"] == latest_capture]
     if rows_frame.empty:
         raise HTTPException(status_code=404, detail="No data found for symbol/expiry")
+    if "strike_price" in rows_frame.columns and "option_type" in rows_frame.columns:
+        rows_frame = rows_frame.sort_values(by=["strike_price", "option_type"], kind="stable")
     rows = rows_frame.to_dict(orient="records")
     return RealtimeSnapshot(date=latest_date, symbol=symbol, captured_at=latest_capture, rows=rows)
 
@@ -321,7 +359,7 @@ def download_range_csv(
             if frame is None or frame.empty:
                 continue
             if expiry is not None:
-                frame = frame[frame["expiry"].astype(str) == expiry]
+                frame = filter_frame_by_expiry(frame, expiry)
             if not frame.empty:
                 daily_frames.append((d, frame))
     else:
@@ -330,7 +368,7 @@ def download_range_csv(
             if frame is None or frame.empty:
                 continue
             if expiry is not None:
-                frame = frame[frame["expiry"].astype(str) == expiry]
+                frame = filter_frame_by_expiry(frame, expiry)
             if not frame.empty:
                 daily_frames.append((d, frame))
 
