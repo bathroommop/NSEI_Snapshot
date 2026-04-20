@@ -4,11 +4,13 @@ import io
 import os
 from datetime import date, datetime, timedelta
 from pathlib import Path
+import zipfile
 
 from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 import pandas as pd
+import requests
 
 try:
     from google.cloud import storage
@@ -43,6 +45,23 @@ def processed_dir(base: Path) -> Path:
 
 app = FastAPI(title="NSEI snapshot API")
 
+NSE_BASE = "https://www.nseindia.com"
+OPTION_CHAIN_PAGE = f"{NSE_BASE}/option-chain?date=select&instrument=OPTIDX&segmentLink=17&symbol=NIFTY"
+OPTION_CHAIN_CONTRACT_INFO = f"{NSE_BASE}/api/option-chain-contract-info"
+NSE_HEADERS = {
+    "user-agent": (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/123.0.0.0 Safari/537.36"
+    ),
+    "accept": "application/json,text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "accept-language": "en-US,en;q=0.9",
+    "referer": OPTION_CHAIN_PAGE,
+    "cache-control": "no-cache",
+    "pragma": "no-cache",
+    "connection": "keep-alive",
+}
+
 
 class FileItem(BaseModel):
     symbol: str
@@ -54,6 +73,11 @@ class RealtimeSnapshot(BaseModel):
     symbol: str
     captured_at: str
     rows: list[dict]
+
+
+class ExpiryListResponse(BaseModel):
+    symbol: str
+    expiries: list[str]
 
 
 @app.get("/health")
@@ -124,6 +148,23 @@ def read_symbol_frame_gcs(client: "storage.Client", bucket: str, d: str, symbol:
     return pd.read_csv(io.BytesIO(blob.download_as_bytes()))
 
 
+def fetch_exchange_expiries(symbol: str) -> list[str]:
+    session = requests.Session()
+    session.headers.update(NSE_HEADERS)
+    try:
+        bootstrap = session.get(OPTION_CHAIN_PAGE, timeout=20)
+        bootstrap.raise_for_status()
+        response = session.get(OPTION_CHAIN_CONTRACT_INFO, params={"symbol": symbol}, timeout=20)
+        response.raise_for_status()
+        payload = response.json()
+    except requests.RequestException as exc:
+        raise HTTPException(status_code=502, detail="Failed to fetch expiry dates from NSE") from exc
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=502, detail="Invalid expiry payload from NSE")
+    expiry_dates = payload.get("expiryDates") or []
+    return [str(item) for item in expiry_dates if str(item).strip()]
+
+
 @app.get("/v1/dates", dependencies=[Depends(require_api_key)])
 def list_dates() -> dict[str, list[str]]:
     bucket = gcs_bucket_name()
@@ -133,6 +174,13 @@ def list_dates() -> dict[str, list[str]]:
         client = storage.Client()
         return {"dates": list_available_dates_gcs(client, bucket)}
     return {"dates": list_available_dates_local()}
+
+
+@app.get("/v1/expiries/{symbol}", dependencies=[Depends(require_api_key)], response_model=ExpiryListResponse)
+def list_expiries(symbol: str) -> ExpiryListResponse:
+    symbol = symbol.upper()
+    expiries = fetch_exchange_expiries(symbol)
+    return ExpiryListResponse(symbol=symbol, expiries=expiries)
 
 
 @app.get("/v1/files", dependencies=[Depends(require_api_key)])
@@ -194,7 +242,7 @@ def download_csv(date: str, symbol: str) -> FileResponse | StreamingResponse:
 
 
 @app.get("/v1/realtime/{symbol}", dependencies=[Depends(require_api_key)], response_model=RealtimeSnapshot)
-def realtime_snapshot(symbol: str) -> RealtimeSnapshot:
+def realtime_snapshot(symbol: str, expiry: str | None = None) -> RealtimeSnapshot:
     symbol = symbol.upper()
     bucket = gcs_bucket_name()
     dates: list[str]
@@ -227,12 +275,22 @@ def realtime_snapshot(symbol: str) -> RealtimeSnapshot:
         raise HTTPException(status_code=500, detail="captured_at column missing")
 
     latest_capture = str(latest_frame["captured_at"].max())
-    rows = latest_frame[latest_frame["captured_at"] == latest_capture].to_dict(orient="records")
+    rows_frame = latest_frame[latest_frame["captured_at"] == latest_capture]
+    if expiry is not None:
+        rows_frame = rows_frame[rows_frame["expiry"].astype(str) == expiry]
+    if rows_frame.empty:
+        raise HTTPException(status_code=404, detail="No data found for symbol/expiry")
+    rows = rows_frame.to_dict(orient="records")
     return RealtimeSnapshot(date=latest_date, symbol=symbol, captured_at=latest_capture, rows=rows)
 
 
 @app.get("/v1/download-range/{symbol}.csv", dependencies=[Depends(require_api_key)], response_model=None)
-def download_range_csv(symbol: str, period: str, anchor_date: str | None = None) -> StreamingResponse:
+def download_range_csv(
+    symbol: str,
+    period: str,
+    anchor_date: str | None = None,
+    expiry: str | None = None,
+) -> StreamingResponse:
     symbol = symbol.upper()
     bucket = gcs_bucket_name()
     period = period.lower().strip()
@@ -252,7 +310,7 @@ def download_range_csv(symbol: str, period: str, anchor_date: str | None = None)
         anchor = parse_iso_date(dates[-1])
 
     dates_for_period = iter_period_dates(period, anchor)
-    frames: list[pd.DataFrame] = []
+    daily_frames: list[tuple[str, pd.DataFrame]] = []
 
     if bucket:
         if storage is None:
@@ -260,27 +318,48 @@ def download_range_csv(symbol: str, period: str, anchor_date: str | None = None)
         client = storage.Client()
         for d in dates_for_period:
             frame = read_symbol_frame_gcs(client, bucket, d, symbol)
-            if frame is not None and not frame.empty:
-                frames.append(frame)
+            if frame is None or frame.empty:
+                continue
+            if expiry is not None:
+                frame = frame[frame["expiry"].astype(str) == expiry]
+            if not frame.empty:
+                daily_frames.append((d, frame))
     else:
         for d in dates_for_period:
             frame = read_symbol_frame_local(d, symbol)
-            if frame is not None and not frame.empty:
-                frames.append(frame)
+            if frame is None or frame.empty:
+                continue
+            if expiry is not None:
+                frame = frame[frame["expiry"].astype(str) == expiry]
+            if not frame.empty:
+                daily_frames.append((d, frame))
 
-    if not frames:
+    if not daily_frames:
         raise HTTPException(status_code=404, detail="No data found for requested range")
-
-    merged = pd.concat(frames, ignore_index=True)
-    buffer = io.StringIO()
-    merged.to_csv(buffer, index=False)
-    payload = buffer.getvalue().encode("utf-8")
 
     first_date = dates_for_period[0]
     last_date = dates_for_period[-1]
-    filename = f"{symbol}_{period}_{first_date}_to_{last_date}.csv"
+    if period == "day":
+        _, day_frame = daily_frames[0]
+        buffer = io.StringIO()
+        day_frame.to_csv(buffer, index=False)
+        payload = buffer.getvalue().encode("utf-8")
+        filename = f"{symbol}_{period}_{first_date}_to_{last_date}.csv"
+        return StreamingResponse(
+            io.BytesIO(payload),
+            media_type="text/csv",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+
+    zip_buffer = io.BytesIO()
+    with zipfile.ZipFile(zip_buffer, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+        for d, frame in daily_frames:
+            csv_bytes = frame.to_csv(index=False).encode("utf-8")
+            zf.writestr(f"{symbol}_{d}.csv", csv_bytes)
+    zip_buffer.seek(0)
+    filename = f"{symbol}_{period}_{first_date}_to_{last_date}.zip"
     return StreamingResponse(
-        io.BytesIO(payload),
-        media_type="text/csv",
+        zip_buffer,
+        media_type="application/zip",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
