@@ -177,11 +177,17 @@ For requested period:
 
 `anchor_date` is optional. If omitted, API uses latest available date.
 `expiry` is optional and filters merged CSV to one expiry.
+`symbol=ALL` is supported and expands to `BANKNIFTY, FINNIFTY, NIFTY`.
+For `symbol=ALL&period=day`, API returns ZIP split by symbol and expiry.
 
 #### Day Example
 
 ```bash
 curl -H "X-API-Key: <YOUR_API_KEY>" -o NIFTY_day.csv "http://18.61.159.121:8080/v1/download-range/NIFTY.csv?period=day&anchor_date=2026-04-20"
+```
+
+```bash
+curl -H "X-API-Key: <YOUR_API_KEY>" -o ALL_day.zip "http://18.61.159.121:8080/v1/download-range/ALL.csv?period=day&anchor_date=2026-04-20"
 ```
 
 #### Week Example
@@ -200,6 +206,48 @@ curl -H "X-API-Key: <YOUR_API_KEY>" -o NIFTY_month.zip "http://18.61.159.121:808
 
 ```bash
 curl -H "X-API-Key: <YOUR_API_KEY>" -o NIFTY_latest_week.csv "http://18.61.159.121:8080/v1/download-range/NIFTY.csv?period=week"
+```
+
+---
+
+## 7) Download Everything as ZIP
+
+### `GET /v1/download-all.zip?date=YYYY-MM-DD&start_date=YYYY-MM-DD&end_date=YYYY-MM-DD&period=day|week|month&anchor_date=YYYY-MM-DD&symbols=ALL|CSV&split_by_expiry=true|false`
+
+Flexible bulk export endpoint.
+
+Date selection priority:
+
+- if `date` is provided, export that single date
+- else if `period` is provided, export dates in that period around `anchor_date` (or latest available date)
+- else export from `start_date` to `end_date` (defaults to full available range)
+
+Symbols:
+
+- `symbols=ALL` exports `BANKNIFTY, FINNIFTY, NIFTY`
+- You can pass custom symbols like `symbols=NIFTY,BANKNIFTY`
+
+Expiry split:
+
+- `split_by_expiry=true` creates separate files per expiry
+- `split_by_expiry=false` keeps one CSV per symbol per date
+
+Examples:
+
+```bash
+curl -H "X-API-Key: <YOUR_API_KEY>" -o all_everything.zip "http://18.61.159.121:8080/v1/download-all.zip"
+```
+
+```bash
+curl -H "X-API-Key: <YOUR_API_KEY>" -o all_today_expiry.zip "http://18.61.159.121:8080/v1/download-all.zip?date=2026-04-21&symbols=ALL&split_by_expiry=true"
+```
+
+```bash
+curl -H "X-API-Key: <YOUR_API_KEY>" -o all_week.zip "http://18.61.159.121:8080/v1/download-all.zip?period=week&anchor_date=2026-04-21"
+```
+
+```bash
+curl -H "X-API-Key: <YOUR_API_KEY>" -o custom.zip "http://18.61.159.121:8080/v1/download-all.zip?start_date=2026-04-01&end_date=2026-04-21&symbols=NIFTY,BANKNIFTY"
 ```
 
 ---

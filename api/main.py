@@ -63,6 +63,7 @@ NSE_HEADERS = {
     "pragma": "no-cache",
     "connection": "keep-alive",
 }
+DOWNLOAD_BUNDLE_SYMBOLS = ["BANKNIFTY", "FINNIFTY", "NIFTY"]
 
 
 class FileItem(BaseModel):
@@ -132,6 +133,12 @@ def filter_frame_by_expiry(frame: pd.DataFrame, expiry: str) -> pd.DataFrame:
     return frame[normalized == target]
 
 
+def filename_slug(value: str) -> str:
+    slug = re.sub(r"[^A-Za-z0-9._-]+", "-", value.strip())
+    slug = slug.strip("-")
+    return slug or "unknown"
+
+
 def iter_period_dates(period: str, anchor: date) -> list[str]:
     if period == "day":
         return [anchor.isoformat()]
@@ -172,6 +179,25 @@ def list_available_dates_gcs(client: "storage.Client", bucket: str) -> list[str]
     return sorted(dates)
 
 
+def list_available_symbols_local(d: str) -> list[str]:
+    day_dir = processed_dir(data_root()) / f"date={d}"
+    if not day_dir.is_dir():
+        return []
+    return sorted(p.stem for p in day_dir.glob("*.csv"))
+
+
+def list_available_symbols_gcs(client: "storage.Client", bucket: str, d: str) -> list[str]:
+    b = client.bucket(bucket)
+    base = f"{gcs_prefix()}/date={d}/"
+    symbols: set[str] = set()
+    for blob in client.list_blobs(b, prefix=base):
+        name = blob.name.rsplit("/", 1)[-1]
+        if not name.endswith(".csv"):
+            continue
+        symbols.add(name.removesuffix(".csv"))
+    return sorted(symbols)
+
+
 def read_symbol_frame_local(d: str, symbol: str) -> pd.DataFrame | None:
     path = processed_dir(data_root()) / f"date={d}" / f"{symbol}.csv"
     if not path.is_file():
@@ -186,6 +212,15 @@ def read_symbol_frame_gcs(client: "storage.Client", bucket: str, d: str, symbol:
     if not blob.exists():
         return None
     return pd.read_csv(io.BytesIO(blob.download_as_bytes()))
+
+
+def resolve_symbols_param(symbols: str | None) -> list[str]:
+    if symbols is None or symbols.strip().upper() == "ALL":
+        return DOWNLOAD_BUNDLE_SYMBOLS.copy()
+    parsed = [item.strip().upper() for item in symbols.split(",") if item.strip()]
+    if not parsed:
+        raise HTTPException(status_code=400, detail="symbols must be ALL or a comma-separated list")
+    return sorted(set(parsed))
 
 
 def fetch_exchange_expiries(symbol: str) -> list[str]:
@@ -441,6 +476,11 @@ def download_range_csv(
     symbol = symbol.upper()
     bucket = gcs_bucket_name()
     period = period.lower().strip()
+    bundle_mode = symbol == "ALL"
+    symbols_to_fetch = DOWNLOAD_BUNDLE_SYMBOLS if bundle_mode else [symbol]
+
+    if bundle_mode and expiry is not None:
+        raise HTTPException(status_code=400, detail="expiry cannot be used when symbol=ALL")
 
     if anchor_date:
         anchor = parse_iso_date(anchor_date)
@@ -457,37 +497,39 @@ def download_range_csv(
         anchor = parse_iso_date(dates[-1])
 
     dates_for_period = iter_period_dates(period, anchor)
-    daily_frames: list[tuple[str, pd.DataFrame]] = []
+    daily_frames: list[tuple[str, str, pd.DataFrame]] = []
 
     if bucket:
         if storage is None:
             raise HTTPException(status_code=500, detail="google-cloud-storage not installed")
         client = storage.Client()
         for d in dates_for_period:
-            frame = read_symbol_frame_gcs(client, bucket, d, symbol)
-            if frame is None or frame.empty:
-                continue
-            if expiry is not None:
-                frame = filter_frame_by_expiry(frame, expiry)
-            if not frame.empty:
-                daily_frames.append((d, frame))
+            for current_symbol in symbols_to_fetch:
+                frame = read_symbol_frame_gcs(client, bucket, d, current_symbol)
+                if frame is None or frame.empty:
+                    continue
+                if expiry is not None:
+                    frame = filter_frame_by_expiry(frame, expiry)
+                if not frame.empty:
+                    daily_frames.append((d, current_symbol, frame))
     else:
         for d in dates_for_period:
-            frame = read_symbol_frame_local(d, symbol)
-            if frame is None or frame.empty:
-                continue
-            if expiry is not None:
-                frame = filter_frame_by_expiry(frame, expiry)
-            if not frame.empty:
-                daily_frames.append((d, frame))
+            for current_symbol in symbols_to_fetch:
+                frame = read_symbol_frame_local(d, current_symbol)
+                if frame is None or frame.empty:
+                    continue
+                if expiry is not None:
+                    frame = filter_frame_by_expiry(frame, expiry)
+                if not frame.empty:
+                    daily_frames.append((d, current_symbol, frame))
 
     if not daily_frames:
         raise HTTPException(status_code=404, detail="No data found for requested range")
 
     first_date = dates_for_period[0]
     last_date = dates_for_period[-1]
-    if period == "day":
-        _, day_frame = daily_frames[0]
+    if period == "day" and not bundle_mode:
+        _, _, day_frame = daily_frames[0]
         buffer = io.StringIO()
         day_frame.to_csv(buffer, index=False)
         payload = buffer.getvalue().encode("utf-8")
@@ -500,11 +542,111 @@ def download_range_csv(
 
     zip_buffer = io.BytesIO()
     with zipfile.ZipFile(zip_buffer, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
-        for d, frame in daily_frames:
-            csv_bytes = frame.to_csv(index=False).encode("utf-8")
-            zf.writestr(f"{symbol}_{d}.csv", csv_bytes)
+        for d, current_symbol, frame in daily_frames:
+            if bundle_mode and period == "day" and "expiry" in frame.columns:
+                normalized = frame["expiry"].astype(str).map(normalize_expiry_value)
+                for expiry_value in sorted(set(normalized)):
+                    if not expiry_value:
+                        continue
+                    expiry_frame = frame[normalized == expiry_value]
+                    if expiry_frame.empty:
+                        continue
+                    csv_bytes = expiry_frame.to_csv(index=False).encode("utf-8")
+                    zf.writestr(f"{current_symbol}_{d}_{filename_slug(expiry_value)}.csv", csv_bytes)
+            else:
+                csv_bytes = frame.to_csv(index=False).encode("utf-8")
+                zf.writestr(f"{current_symbol}_{d}.csv", csv_bytes)
     zip_buffer.seek(0)
-    filename = f"{symbol}_{period}_{first_date}_to_{last_date}.zip"
+    filename = f"{'ALL' if bundle_mode else symbol}_{period}_{first_date}_to_{last_date}.zip"
+    return StreamingResponse(
+        zip_buffer,
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@app.get("/v1/download-all.zip", dependencies=[Depends(require_api_key)], response_model=None)
+def download_all_zip(
+    date: str | None = None,
+    start_date: str | None = None,
+    end_date: str | None = None,
+    period: str | None = None,
+    anchor_date: str | None = None,
+    symbols: str | None = "ALL",
+    split_by_expiry: bool = False,
+) -> StreamingResponse:
+    bucket = gcs_bucket_name()
+    if bucket:
+        if storage is None:
+            raise HTTPException(status_code=500, detail="google-cloud-storage not installed")
+        client = storage.Client()
+        available_dates = list_available_dates_gcs(client, bucket)
+    else:
+        client = None
+        available_dates = list_available_dates_local()
+    if not available_dates:
+        raise HTTPException(status_code=404, detail="No data available")
+
+    if date is not None:
+        selected_dates = [parse_iso_date(date).isoformat()]
+    elif period is not None:
+        normalized_period = period.lower().strip()
+        if anchor_date is not None:
+            anchor = parse_iso_date(anchor_date)
+        else:
+            anchor = parse_iso_date(available_dates[-1])
+        selected_dates = iter_period_dates(normalized_period, anchor)
+    else:
+        start = parse_iso_date(start_date).isoformat() if start_date else available_dates[0]
+        end = parse_iso_date(end_date).isoformat() if end_date else available_dates[-1]
+        if start > end:
+            raise HTTPException(status_code=400, detail="start_date must be <= end_date")
+        selected_dates = [d for d in available_dates if start <= d <= end]
+
+    if not selected_dates:
+        raise HTTPException(status_code=404, detail="No data found for requested date range")
+
+    requested_symbols = resolve_symbols_param(symbols)
+    zip_buffer = io.BytesIO()
+    files_written = 0
+    with zipfile.ZipFile(zip_buffer, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+        for d in selected_dates:
+            if bucket:
+                day_symbols = set(list_available_symbols_gcs(client, bucket, d))
+            else:
+                day_symbols = set(list_available_symbols_local(d))
+            symbol_list = sorted(sym for sym in requested_symbols if sym in day_symbols)
+            for sym in symbol_list:
+                if bucket:
+                    frame = read_symbol_frame_gcs(client, bucket, d, sym)
+                else:
+                    frame = read_symbol_frame_local(d, sym)
+                if frame is None or frame.empty:
+                    continue
+                if split_by_expiry and "expiry" in frame.columns:
+                    normalized = frame["expiry"].astype(str).map(normalize_expiry_value)
+                    for expiry_value in sorted(set(normalized)):
+                        if not expiry_value:
+                            continue
+                        expiry_frame = frame[normalized == expiry_value]
+                        if expiry_frame.empty:
+                            continue
+                        zf.writestr(
+                            f"date={d}/{sym}_{filename_slug(expiry_value)}.csv",
+                            expiry_frame.to_csv(index=False).encode("utf-8"),
+                        )
+                        files_written += 1
+                else:
+                    zf.writestr(f"date={d}/{sym}.csv", frame.to_csv(index=False).encode("utf-8"))
+                    files_written += 1
+
+    if files_written == 0:
+        raise HTTPException(status_code=404, detail="No data found for requested filters")
+
+    zip_buffer.seek(0)
+    first_date = selected_dates[0]
+    last_date = selected_dates[-1]
+    filename = f"ALL_DATA_{first_date}_to_{last_date}.zip"
     return StreamingResponse(
         zip_buffer,
         media_type="application/zip",
