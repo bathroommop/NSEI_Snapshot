@@ -4,7 +4,6 @@ import { memo, useCallback, useDeferredValue, useEffect, useMemo, useState } fro
 import {
   type ExpiriesResponse,
   fetchNseiJson,
-  nseiDownloadAllUrl,
   nseiDownloadUrl,
   type DatesResponse,
   type FilesResponse,
@@ -114,15 +113,6 @@ export default function Dashboard() {
     fullExport: false,
   });
   const [downloadErr, setDownloadErr] = useState<string | null>(null);
-  const [splitByExpiry, setSplitByExpiry] = useState(true);
-  const [customSymbols, setCustomSymbols] = useState("NIFTY,BANKNIFTY,FINNIFTY");
-  const [fullExportMode, setFullExportMode] = useState<"date" | "range">("date");
-  const [rangeStartDate, setRangeStartDate] = useState("");
-  const [rangeEndDate, setRangeEndDate] = useState("");
-  const [downloadScope, setDownloadScope] = useState<"single" | "allSymbols" | "fullExport">(
-    "single"
-  );
-  const [downloadPeriod, setDownloadPeriod] = useState<"day" | "week" | "month">("day");
   const [density, setDensity] = useState<"compact" | "comfortable">("comfortable");
   const [rt, setRt] = useState<RealtimeResponse | null>(null);
   const [rtErr, setRtErr] = useState<string | null>(null);
@@ -304,36 +294,6 @@ export default function Dashboard() {
     return "";
   }, [downloadState]);
 
-  const downloadSummary = useMemo(() => {
-    if (downloadScope === "fullExport") {
-      if (fullExportMode === "date") {
-        return `Full export • Date ${selectedDate || "not selected"} • Symbols ${customSymbols || "ALL"} • ${
-          splitByExpiry ? "Split by expiry" : "Combined by symbol/date"
-        }`;
-      }
-      return `Full export • ${rangeStartDate || "start"} to ${rangeEndDate || "end"} • Symbols ${
-        customSymbols || "ALL"
-      } • ${splitByExpiry ? "Split by expiry" : "Combined by symbol/date"}`;
-    }
-    if (downloadScope === "allSymbols") {
-      return `All symbols • ${downloadPeriod.toUpperCase()} • Anchor ${selectedDate || "latest"} • Expiry not applied`;
-    }
-    return `${symbol || "No symbol"} • ${downloadPeriod.toUpperCase()} • Anchor ${
-      selectedDate || "latest"
-    } • ${selectedExpiry ? `Expiry ${selectedExpiry}` : "All expiries"}`;
-  }, [
-    customSymbols,
-    downloadPeriod,
-    downloadScope,
-    fullExportMode,
-    rangeEndDate,
-    rangeStartDate,
-    selectedDate,
-    selectedExpiry,
-    splitByExpiry,
-    symbol,
-  ]);
-
   const goPrevPage = useCallback(() => {
     setTablePage((p) => Math.max(1, p - 1));
   }, []);
@@ -394,84 +354,6 @@ export default function Dashboard() {
       setDownloadState((prev) => ({ ...prev, [key]: false }));
     }
   }, [selectedDate, selectedExpiry, symbol]);
-
-  const runFullExport = useCallback(async () => {
-    setDownloadErr(null);
-    setDownloadState((prev) => ({ ...prev, fullExport: true }));
-    try {
-      const symbols =
-        customSymbols.trim().toUpperCase() === "ALL"
-          ? "ALL"
-          : customSymbols
-              .split(",")
-              .map((s) => s.trim().toUpperCase())
-              .filter(Boolean)
-              .join(",");
-      const url = nseiDownloadAllUrl({
-        date: fullExportMode === "date" ? selectedDate || undefined : undefined,
-        start_date: fullExportMode === "range" ? rangeStartDate || undefined : undefined,
-        end_date: fullExportMode === "range" ? rangeEndDate || undefined : undefined,
-        period: "day",
-        symbols: symbols || "ALL",
-        split_by_expiry: splitByExpiry,
-      });
-      const res = await fetch(url, { cache: "no-store" });
-      if (!res.ok) {
-        const body = await res.text();
-        throw new Error(body || "Full export failed");
-      }
-      const blob = await res.blob();
-      const fileName = parseFileName(
-        res.headers.get("content-disposition"),
-        `nsei-full-export-${fullExportMode}.zip`
-      );
-      const objectUrl = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = objectUrl;
-      a.download = fileName;
-      a.click();
-      URL.revokeObjectURL(objectUrl);
-    } catch (e) {
-      setDownloadErr(e instanceof Error ? e.message : "Full export failed");
-    } finally {
-      setDownloadState((prev) => ({ ...prev, fullExport: false }));
-    }
-  }, [customSymbols, fullExportMode, rangeEndDate, rangeStartDate, selectedDate, splitByExpiry]);
-
-  const runQuickPreset = useCallback(
-    async (preset: "singleDay" | "singleWeek" | "singleMonth" | "allDay") => {
-      if (preset === "singleDay") {
-        setDownloadScope("single");
-        setDownloadPeriod("day");
-        await runDownload("day", false);
-        return;
-      }
-      if (preset === "singleWeek") {
-        setDownloadScope("single");
-        setDownloadPeriod("week");
-        await runDownload("week", false);
-        return;
-      }
-      if (preset === "singleMonth") {
-        setDownloadScope("single");
-        setDownloadPeriod("month");
-        await runDownload("month", false);
-        return;
-      }
-      setDownloadScope("allSymbols");
-      setDownloadPeriod("day");
-      await runDownload("day", true);
-    },
-    [runDownload]
-  );
-
-  const runPrimaryDownload = useCallback(async () => {
-    if (downloadScope === "fullExport") {
-      await runFullExport();
-      return;
-    }
-    await runDownload(downloadPeriod, downloadScope === "allSymbols");
-  }, [downloadPeriod, downloadScope, runFullExport, runDownload]);
 
   const th = useMemo(
     () =>
@@ -806,189 +688,40 @@ export default function Dashboard() {
               CSV
             </div>
             <div className="mt-2 flex flex-col gap-2">
-              <div className="grid grid-cols-2 gap-2">
+              <div className="grid grid-cols-1 gap-2">
                 <button
                   type="button"
-                  disabled={isAnyDownloadRunning}
-                  onClick={() => void runQuickPreset("singleDay")}
+                  disabled={isAnyDownloadRunning || !selectedDate}
+                  onClick={() => void runDownload("day", true)}
                   className="rounded border border-[var(--line)] px-2 py-1.5 text-xs text-[var(--fg)] hover:border-white/30 disabled:opacity-50"
                 >
-                  Quick Day
+                  Download all per day
                 </button>
                 <button
                   type="button"
-                  disabled={isAnyDownloadRunning}
-                  onClick={() => void runQuickPreset("singleWeek")}
+                  disabled={isAnyDownloadRunning || !selectedDate}
+                  onClick={() => void runDownload("week", true)}
                   className="rounded border border-[var(--line)] px-2 py-1.5 text-xs text-[var(--fg)] hover:border-white/30 disabled:opacity-50"
                 >
-                  Quick Week
+                  Download all per week
                 </button>
                 <button
                   type="button"
-                  disabled={isAnyDownloadRunning}
-                  onClick={() => void runQuickPreset("singleMonth")}
+                  disabled={isAnyDownloadRunning || !selectedDate}
+                  onClick={() => void runDownload("month", true)}
                   className="rounded border border-[var(--line)] px-2 py-1.5 text-xs text-[var(--fg)] hover:border-white/30 disabled:opacity-50"
                 >
-                  Quick Month
-                </button>
-                <button
-                  type="button"
-                  disabled={isAnyDownloadRunning}
-                  onClick={() => void runQuickPreset("allDay")}
-                  className="rounded border border-[var(--line)] px-2 py-1.5 text-xs text-[var(--fg)] hover:border-white/30 disabled:opacity-50"
-                >
-                  All Symbols Day
+                  Download all per month
                 </button>
               </div>
-              <div className="grid grid-cols-3 gap-2">
-                <button
-                  type="button"
-                  onClick={() => setDownloadScope("single")}
-                  className={`rounded border px-2 py-1 text-xs ${
-                    downloadScope === "single"
-                      ? "border-white/40 bg-white text-black"
-                      : "border-[var(--line)] text-[var(--muted)]"
-                  }`}
-                >
-                  Symbol
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setDownloadScope("allSymbols")}
-                  className={`rounded border px-2 py-1 text-xs ${
-                    downloadScope === "allSymbols"
-                      ? "border-white/40 bg-white text-black"
-                      : "border-[var(--line)] text-[var(--muted)]"
-                  }`}
-                >
-                  All Symbols
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setDownloadScope("fullExport")}
-                  className={`rounded border px-2 py-1 text-xs ${
-                    downloadScope === "fullExport"
-                      ? "border-white/40 bg-white text-black"
-                      : "border-[var(--line)] text-[var(--muted)]"
-                  }`}
-                >
-                  Full Export
-                </button>
-              </div>
-              {downloadScope !== "fullExport" ? (
-                <div className="grid grid-cols-3 gap-2">
-                  {(["day", "week", "month"] as const).map((period) => (
-                    <button
-                      key={period}
-                      type="button"
-                      onClick={() => setDownloadPeriod(period)}
-                      className={`rounded border px-2 py-1 text-xs uppercase ${
-                        downloadPeriod === period
-                          ? "border-white/40 bg-white text-black"
-                          : "border-[var(--line)] text-[var(--muted)]"
-                      }`}
-                    >
-                      {period}
-                    </button>
-                  ))}
-                </div>
-              ) : null}
               <div className="rounded border border-[var(--line)] bg-[var(--bg)] px-2 py-1.5 text-[11px] text-[var(--muted)]">
-                {downloadSummary}
+                All-symbol download using selected date anchor ({selectedDate || "not selected"})
               </div>
               {isAnyDownloadRunning ? (
                 <div className="rounded border border-emerald-500/30 bg-emerald-500/10 px-2 py-1 text-xs text-emerald-300">
                   {activeDownloadLabel}
                 </div>
               ) : null}
-              <button
-                type="button"
-                disabled={
-                  isAnyDownloadRunning ||
-                  (downloadScope !== "fullExport" && !selectedDate) ||
-                  (downloadScope === "single" && !symbol) ||
-                  (downloadScope === "fullExport" &&
-                    fullExportMode === "range" &&
-                    (!rangeStartDate || !rangeEndDate))
-                }
-                onClick={() => void runPrimaryDownload()}
-                className="rounded border border-white/30 bg-white px-3 py-2 text-center text-xs font-medium text-black transition hover:bg-neutral-200 disabled:cursor-not-allowed disabled:opacity-50"
-              >
-                {isAnyDownloadRunning
-                  ? activeDownloadLabel
-                  : downloadScope === "fullExport"
-                    ? "Download Full Export ZIP"
-                    : `Download ${downloadScope === "allSymbols" ? "All Symbols" : symbol} ${downloadPeriod.toUpperCase()}`}
-              </button>
-              {downloadScope === "fullExport" ? (
-                <div className="mt-1 border-t border-[var(--line)] pt-2">
-                  <div className="mb-2 text-[10px] uppercase tracking-wide text-[var(--muted)]">
-                    Full Export ZIP
-                  </div>
-                  <div className="mb-2 flex gap-2">
-                    <button
-                      type="button"
-                      onClick={() => setFullExportMode("date")}
-                      className={`flex-1 rounded border px-2 py-1 text-xs ${
-                        fullExportMode === "date"
-                          ? "border-white/40 bg-white text-black"
-                          : "border-[var(--line)] text-[var(--muted)]"
-                      }`}
-                    >
-                      Single Date
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setFullExportMode("range")}
-                      className={`flex-1 rounded border px-2 py-1 text-xs ${
-                        fullExportMode === "range"
-                          ? "border-white/40 bg-white text-black"
-                          : "border-[var(--line)] text-[var(--muted)]"
-                      }`}
-                    >
-                      Date Range
-                    </button>
-                  </div>
-                  {fullExportMode === "range" ? (
-                    <div className="mb-2 flex gap-2">
-                      <input
-                        value={rangeStartDate}
-                        onChange={(e) => setRangeStartDate(e.target.value)}
-                        placeholder="Start YYYY-MM-DD"
-                        className="w-1/2 rounded border border-[var(--line)] bg-[var(--bg)] px-2 py-1 text-xs text-[var(--fg)]"
-                      />
-                      <input
-                        value={rangeEndDate}
-                        onChange={(e) => setRangeEndDate(e.target.value)}
-                        placeholder="End YYYY-MM-DD"
-                        className="w-1/2 rounded border border-[var(--line)] bg-[var(--bg)] px-2 py-1 text-xs text-[var(--fg)]"
-                      />
-                    </div>
-                  ) : null}
-                  <input
-                    value={customSymbols}
-                    onChange={(e) => setCustomSymbols(e.target.value)}
-                    placeholder="ALL or NIFTY,BANKNIFTY"
-                    className="mb-2 w-full rounded border border-[var(--line)] bg-[var(--bg)] px-2 py-1 text-xs text-[var(--fg)]"
-                  />
-                  <label className="mb-2 flex items-center gap-2 text-xs text-[var(--muted)]">
-                    <input
-                      type="checkbox"
-                      checked={splitByExpiry}
-                      onChange={(e) => setSplitByExpiry(e.target.checked)}
-                    />
-                    Split by expiry
-                  </label>
-                </div>
-              ) : (
-                <div className="text-[10px] text-[var(--muted)]">
-                  {downloadScope === "allSymbols"
-                    ? "All symbols mode ignores expiry filter"
-                    : selectedExpiry
-                      ? `Filtered by ${selectedExpiry}`
-                      : "All expiries included"}
-                </div>
-              )}
               {downloadErr ? (
                 <div className={`text-xs ${downloadErr === "Not authorized" ? "text-red-400" : "text-[var(--muted)]"}`}>
                   {downloadErr}
