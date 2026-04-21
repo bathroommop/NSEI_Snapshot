@@ -100,3 +100,25 @@ export function nseiDownloadUrl(
   if (a.expiry) q.set("expiry", a.expiry);
   return `${prefix}/v1/download-range/${a.symbol}.csv?${q.toString()}`;
 }
+
+export function nseiDownloadAllUrl(args: {
+  date?: string;
+  start_date?: string;
+  end_date?: string;
+  period?: "day" | "week" | "month";
+  anchor_date?: string;
+  symbols?: string;
+  split_by_expiry?: boolean;
+}) {
+  const q = new URLSearchParams();
+  if (args.date) q.set("date", args.date);
+  if (args.start_date) q.set("start_date", args.start_date);
+  if (args.end_date) q.set("end_date", args.end_date);
+  if (args.period) q.set("period", args.period);
+  if (args.anchor_date) q.set("anchor_date", args.anchor_date);
+  if (args.symbols) q.set("symbols", args.symbols);
+  if (typeof args.split_by_expiry === "boolean") {
+    q.set("split_by_expiry", args.split_by_expiry ? "true" : "false");
+  }
+  return `${prefix}/v1/download-all.zip?${q.toString()}`;
+}

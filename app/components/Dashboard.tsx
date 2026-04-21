@@ -1,9 +1,10 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { memo, useCallback, useDeferredValue, useEffect, useMemo, useState } from "react";
 import {
   type ExpiriesResponse,
   fetchNseiJson,
+  nseiDownloadAllUrl,
   nseiDownloadUrl,
   type DatesResponse,
   type FilesResponse,
@@ -41,6 +42,44 @@ function parseFileName(disposition: string | null, fallback: string) {
   return plain?.trim() || fallback;
 }
 
+const RealtimeTableRow = memo(function RealtimeTableRow({
+  row,
+  rowKey,
+  td,
+}: {
+  row: RealtimeRow;
+  rowKey: string;
+  td: string;
+}) {
+  return (
+    <tr key={rowKey} className="transition-colors hover:bg-white/[0.03]">
+      <td className={`${td} whitespace-nowrap`}>
+        {formatNum(row.strike_price, 0)}
+      </td>
+      <td className={`${td} font-medium`}>{row.option_type}</td>
+      <td className={`${td} text-right`}>
+        {formatNum(row.last_price, 2)}
+      </td>
+      <td className={`${td} text-right ${cellNeg(row.pchange)}`}>
+        {formatNum(row.pchange, 2)}
+      </td>
+      <td className={`${td} text-right`}>
+        {formatNum(row.open_interest, 0)}
+      </td>
+      <td className={`${td} text-right`}>
+        {formatNum(row.total_traded_volume, 0)}
+      </td>
+      <td className={`${td} text-right text-[11px]`}>
+        {formatNum(row.bid_price, 2)} × {formatNum(row.bid_qty, 0)}
+      </td>
+      <td className={`${td} text-right text-[11px]`}>
+        {formatNum(row.ask_price, 2)} × {formatNum(row.ask_qty, 0)}
+      </td>
+      <td className={`${td} text-[var(--muted)]`}>{row.expiry}</td>
+    </tr>
+  );
+});
+
 export default function Dashboard() {
   const [mounted, setMounted] = useState(false);
   const [health, setHealth] = useState<HealthResponse | null>(null);
@@ -61,13 +100,36 @@ export default function Dashboard() {
     day: boolean;
     week: boolean;
     month: boolean;
-  }>({ day: false, week: false, month: false });
+    bundleDay: boolean;
+    bundleWeek: boolean;
+    bundleMonth: boolean;
+    fullExport: boolean;
+  }>({
+    day: false,
+    week: false,
+    month: false,
+    bundleDay: false,
+    bundleWeek: false,
+    bundleMonth: false,
+    fullExport: false,
+  });
   const [downloadErr, setDownloadErr] = useState<string | null>(null);
+  const [splitByExpiry, setSplitByExpiry] = useState(true);
+  const [customSymbols, setCustomSymbols] = useState("NIFTY,BANKNIFTY,FINNIFTY");
+  const [fullExportMode, setFullExportMode] = useState<"date" | "range">("date");
+  const [rangeStartDate, setRangeStartDate] = useState("");
+  const [rangeEndDate, setRangeEndDate] = useState("");
+  const [downloadScope, setDownloadScope] = useState<"single" | "allSymbols" | "fullExport">(
+    "single"
+  );
+  const [downloadPeriod, setDownloadPeriod] = useState<"day" | "week" | "month">("day");
+  const [density, setDensity] = useState<"compact" | "comfortable">("comfortable");
   const [rt, setRt] = useState<RealtimeResponse | null>(null);
   const [rtErr, setRtErr] = useState<string | null>(null);
   const [rtLoading, setRtLoading] = useState(false);
   const [tablePage, setTablePage] = useState(1);
   const pageSize = 20;
+  const deferredSymbolQuery = useDeferredValue(symbolQuery);
 
   useEffect(() => {
     const id = window.requestAnimationFrame(() => setMounted(true));
@@ -207,12 +269,7 @@ export default function Dashboard() {
   }, [symbol, selectedExpiry, selectedDate]);
 
   const displayRows = useMemo(() => {
-    const rows = rt?.rows ?? [];
-    return [...rows].sort((a, b) => {
-      if (a.strike_price !== b.strike_price)
-        return a.strike_price - b.strike_price;
-      return a.option_type.localeCompare(b.option_type);
-    });
+    return rt?.rows ?? [];
   }, [rt]);
 
   const tablePageCount = Math.max(1, Math.ceil(displayRows.length / pageSize));
@@ -224,32 +281,95 @@ export default function Dashboard() {
   }, [displayRows, safeTablePage]);
 
   const filteredFiles = useMemo(() => {
-    const q = symbolQuery.trim().toLowerCase();
+    const q = deferredSymbolQuery.trim().toLowerCase();
     if (!q) return files;
     return files.filter(
       (f) => f.symbol.toLowerCase().includes(q) || f.name.toLowerCase().includes(q)
     );
-  }, [files, symbolQuery]);
+  }, [files, deferredSymbolQuery]);
 
-  async function runDownload(period: "day" | "week" | "month") {
-    if (!symbol) return;
+  const isAnyDownloadRunning = useMemo(
+    () => Object.values(downloadState).some(Boolean),
+    [downloadState]
+  );
+
+  const activeDownloadLabel = useMemo(() => {
+    if (downloadState.fullExport) return "Preparing full export ZIP...";
+    if (downloadState.bundleMonth) return "Preparing all-symbol month ZIP...";
+    if (downloadState.bundleWeek) return "Preparing all-symbol week ZIP...";
+    if (downloadState.bundleDay) return "Preparing all-symbol day ZIP...";
+    if (downloadState.month) return "Preparing month ZIP...";
+    if (downloadState.week) return "Preparing week ZIP...";
+    if (downloadState.day) return "Preparing day CSV...";
+    return "";
+  }, [downloadState]);
+
+  const downloadSummary = useMemo(() => {
+    if (downloadScope === "fullExport") {
+      if (fullExportMode === "date") {
+        return `Full export • Date ${selectedDate || "not selected"} • Symbols ${customSymbols || "ALL"} • ${
+          splitByExpiry ? "Split by expiry" : "Combined by symbol/date"
+        }`;
+      }
+      return `Full export • ${rangeStartDate || "start"} to ${rangeEndDate || "end"} • Symbols ${
+        customSymbols || "ALL"
+      } • ${splitByExpiry ? "Split by expiry" : "Combined by symbol/date"}`;
+    }
+    if (downloadScope === "allSymbols") {
+      return `All symbols • ${downloadPeriod.toUpperCase()} • Anchor ${selectedDate || "latest"} • Expiry not applied`;
+    }
+    return `${symbol || "No symbol"} • ${downloadPeriod.toUpperCase()} • Anchor ${
+      selectedDate || "latest"
+    } • ${selectedExpiry ? `Expiry ${selectedExpiry}` : "All expiries"}`;
+  }, [
+    customSymbols,
+    downloadPeriod,
+    downloadScope,
+    fullExportMode,
+    rangeEndDate,
+    rangeStartDate,
+    selectedDate,
+    selectedExpiry,
+    splitByExpiry,
+    symbol,
+  ]);
+
+  const goPrevPage = useCallback(() => {
+    setTablePage((p) => Math.max(1, p - 1));
+  }, []);
+
+  const goNextPage = useCallback(() => {
+    setTablePage((p) => Math.min(tablePageCount, p + 1));
+  }, [tablePageCount]);
+
+  const runDownload = useCallback(async (period: "day" | "week" | "month", bundle = false) => {
+    if (!symbol && !bundle) return;
     if (period === "day" && !selectedDate) return;
     setDownloadErr(null);
-    setDownloadState((prev) => ({ ...prev, [period]: true }));
+    const key = bundle
+      ? period === "day"
+        ? "bundleDay"
+        : period === "week"
+          ? "bundleWeek"
+          : "bundleMonth"
+      : period;
+    setDownloadState((prev) => ({ ...prev, [key]: true }));
     try {
+      const activeSymbol = bundle ? "ALL" : symbol;
+      const activeExpiry = bundle ? undefined : selectedExpiry || undefined;
       const url =
         period === "day"
           ? nseiDownloadUrl("range", {
-              symbol,
+              symbol: activeSymbol,
               period: "day",
               anchor_date: selectedDate || undefined,
-              expiry: selectedExpiry || undefined,
+              expiry: activeExpiry,
             })
           : nseiDownloadUrl("range", {
-              symbol,
+              symbol: activeSymbol,
               period,
               anchor_date: selectedDate || undefined,
-              expiry: selectedExpiry || undefined,
+              expiry: activeExpiry,
             });
       const res = await fetch(url, { cache: "no-store" });
       if (!res.ok) {
@@ -259,8 +379,8 @@ export default function Dashboard() {
       const blob = await res.blob();
       const fallback =
         period === "day"
-          ? `${symbol}-${selectedDate || "latest"}.csv`
-          : `${symbol}-${period}-${selectedDate || "latest"}.${period === "month" || period === "week" ? "zip" : "csv"}`;
+          ? `${activeSymbol}-${selectedDate || "latest"}.${bundle ? "zip" : "csv"}`
+          : `${activeSymbol}-${period}-${selectedDate || "latest"}.zip`;
       const fileName = parseFileName(res.headers.get("content-disposition"), fallback);
       const objectUrl = URL.createObjectURL(blob);
       const a = document.createElement("a");
@@ -271,13 +391,103 @@ export default function Dashboard() {
     } catch (e) {
       setDownloadErr(e instanceof Error ? e.message : "Download failed");
     } finally {
-      setDownloadState((prev) => ({ ...prev, [period]: false }));
+      setDownloadState((prev) => ({ ...prev, [key]: false }));
     }
-  }
+  }, [selectedDate, selectedExpiry, symbol]);
 
-  const th =
-    "border-b border-[var(--line)] bg-[var(--card)] px-2 py-2 text-left text-[10px] font-medium uppercase tracking-wide text-[var(--muted)]";
-  const td = "border-b border-[var(--line)]/50 px-2 py-1.5 tabular-nums text-[11px] text-[var(--fg)]";
+  const runFullExport = useCallback(async () => {
+    setDownloadErr(null);
+    setDownloadState((prev) => ({ ...prev, fullExport: true }));
+    try {
+      const symbols =
+        customSymbols.trim().toUpperCase() === "ALL"
+          ? "ALL"
+          : customSymbols
+              .split(",")
+              .map((s) => s.trim().toUpperCase())
+              .filter(Boolean)
+              .join(",");
+      const url = nseiDownloadAllUrl({
+        date: fullExportMode === "date" ? selectedDate || undefined : undefined,
+        start_date: fullExportMode === "range" ? rangeStartDate || undefined : undefined,
+        end_date: fullExportMode === "range" ? rangeEndDate || undefined : undefined,
+        period: "day",
+        symbols: symbols || "ALL",
+        split_by_expiry: splitByExpiry,
+      });
+      const res = await fetch(url, { cache: "no-store" });
+      if (!res.ok) {
+        const body = await res.text();
+        throw new Error(body || "Full export failed");
+      }
+      const blob = await res.blob();
+      const fileName = parseFileName(
+        res.headers.get("content-disposition"),
+        `nsei-full-export-${fullExportMode}.zip`
+      );
+      const objectUrl = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = objectUrl;
+      a.download = fileName;
+      a.click();
+      URL.revokeObjectURL(objectUrl);
+    } catch (e) {
+      setDownloadErr(e instanceof Error ? e.message : "Full export failed");
+    } finally {
+      setDownloadState((prev) => ({ ...prev, fullExport: false }));
+    }
+  }, [customSymbols, fullExportMode, rangeEndDate, rangeStartDate, selectedDate, splitByExpiry]);
+
+  const runQuickPreset = useCallback(
+    async (preset: "singleDay" | "singleWeek" | "singleMonth" | "allDay") => {
+      if (preset === "singleDay") {
+        setDownloadScope("single");
+        setDownloadPeriod("day");
+        await runDownload("day", false);
+        return;
+      }
+      if (preset === "singleWeek") {
+        setDownloadScope("single");
+        setDownloadPeriod("week");
+        await runDownload("week", false);
+        return;
+      }
+      if (preset === "singleMonth") {
+        setDownloadScope("single");
+        setDownloadPeriod("month");
+        await runDownload("month", false);
+        return;
+      }
+      setDownloadScope("allSymbols");
+      setDownloadPeriod("day");
+      await runDownload("day", true);
+    },
+    [runDownload]
+  );
+
+  const runPrimaryDownload = useCallback(async () => {
+    if (downloadScope === "fullExport") {
+      await runFullExport();
+      return;
+    }
+    await runDownload(downloadPeriod, downloadScope === "allSymbols");
+  }, [downloadPeriod, downloadScope, runFullExport, runDownload]);
+
+  const th = useMemo(
+    () =>
+      `border-b border-[var(--line)] bg-[var(--card)] text-left text-[10px] font-medium uppercase tracking-wide text-[var(--muted)] ${density === "compact" ? "px-1.5 py-1.5" : "px-2 py-2"}`,
+    [density]
+  );
+  const td = useMemo(
+    () =>
+      `border-b border-[var(--line)]/50 tabular-nums text-[var(--fg)] ${density === "compact" ? "px-1.5 py-1 text-[10px]" : "px-2 py-1.5 text-[11px]"}`,
+    [density]
+  );
+  const panelClass = useMemo(
+    () =>
+      `rounded-lg border border-[var(--line)] bg-[var(--card)] ${density === "compact" ? "p-2.5" : "p-3"}`,
+    [density]
+  );
 
   if (!mounted) {
     return (
@@ -296,10 +506,17 @@ export default function Dashboard() {
 
   return (
     <div className="flex h-[100dvh] flex-col overflow-hidden bg-[var(--bg)]">
-      <header className="shrink-0 border-b border-[var(--line)] bg-[var(--card)]/60 px-4 py-3 backdrop-blur">
+      <header className="shrink-0 border-b border-[var(--line)] bg-[var(--card)]/75 px-4 py-3 backdrop-blur">
         <div className="flex items-center justify-between gap-3">
           <span className="text-sm font-semibold text-[var(--fg)]">NSEI Snapshot</span>
           <div className="flex items-center gap-2 text-[10px]">
+            <button
+              type="button"
+              onClick={() => setDensity((d) => (d === "compact" ? "comfortable" : "compact"))}
+              className="rounded border border-[var(--line)] px-2 py-1 text-[var(--muted)] hover:text-[var(--fg)]"
+            >
+              {density === "compact" ? "Comfortable" : "Compact"}
+            </button>
             <span className="rounded border border-[var(--line)] px-2 py-1 text-[var(--muted)]">
               Rows {formatNum(rt?.row_count ?? displayRows.length, 0)}
             </span>
@@ -318,7 +535,7 @@ export default function Dashboard() {
 
       <div className="flex min-h-0 flex-1 flex-col gap-3 p-3 lg:flex-row lg:items-stretch lg:gap-4 lg:p-4">
         <div className="flex min-h-0 min-w-0 flex-1 flex-col lg:min-w-0">
-          <div className="mb-2 flex shrink-0 flex-wrap items-end justify-between gap-2 rounded-lg border border-[var(--line)] bg-[var(--card)] p-3">
+          <div className={`mb-2 flex shrink-0 flex-wrap items-end justify-between gap-2 ${panelClass}`}>
             <div>
               <div className="text-[10px] uppercase tracking-wide text-[var(--muted)]">
                 Realtime · {symbol}
@@ -348,7 +565,7 @@ export default function Dashboard() {
             ) : null}
           </div>
 
-          <div className="mb-2 grid shrink-0 grid-cols-2 gap-2 rounded-lg border border-[var(--line)] bg-[var(--card)] p-2 text-xs md:grid-cols-4">
+          <div className={`mb-2 grid shrink-0 grid-cols-2 gap-2 text-xs md:grid-cols-4 ${panelClass}`}>
             <div className="rounded border border-[var(--line)] px-2 py-1.5">
               <div className="text-[10px] uppercase tracking-wide text-[var(--muted)]">Underlying</div>
               <div className="mt-0.5 tabular-nums text-[var(--fg)]">{formatNum(rt?.underlying_value, 2)}</div>
@@ -377,7 +594,7 @@ export default function Dashboard() {
             </div>
           ) : null}
 
-          <div className="min-h-0 flex-1 overflow-y-auto rounded-lg border border-[var(--line)] bg-[var(--card)]">
+          <div className="min-h-0 flex-1 overflow-y-auto rounded-lg border border-[var(--line)] bg-[var(--card)] shadow-[0_8px_24px_rgba(0,0,0,0.28)]">
             <table className="w-full table-fixed border-collapse">
               <thead className="sticky top-0 z-10 shadow-[0_1px_0_var(--line)]">
                 <tr>
@@ -395,34 +612,12 @@ export default function Dashboard() {
               <tbody>
                 {pagedRows.length ? (
                   pagedRows.map((r: RealtimeRow, idx: number) => (
-                    <tr
-                      key={`${r.strike_price}-${r.option_type}-${idx}`}
-                      className="hover:bg-white/[0.03]"
-                    >
-                      <td className={`${td} whitespace-nowrap`}>
-                        {formatNum(r.strike_price, 0)}
-                      </td>
-                      <td className={`${td} font-medium`}>{r.option_type}</td>
-                      <td className={`${td} text-right`}>
-                        {formatNum(r.last_price, 2)}
-                      </td>
-                      <td className={`${td} text-right ${cellNeg(r.pchange)}`}>
-                        {formatNum(r.pchange, 2)}
-                      </td>
-                      <td className={`${td} text-right`}>
-                        {formatNum(r.open_interest, 0)}
-                      </td>
-                      <td className={`${td} text-right`}>
-                        {formatNum(r.total_traded_volume, 0)}
-                      </td>
-                      <td className={`${td} text-right text-[11px]`}>
-                        {formatNum(r.bid_price, 2)} × {formatNum(r.bid_qty, 0)}
-                      </td>
-                      <td className={`${td} text-right text-[11px]`}>
-                        {formatNum(r.ask_price, 2)} × {formatNum(r.ask_qty, 0)}
-                      </td>
-                      <td className={`${td} text-[var(--muted)]`}>{r.expiry}</td>
-                    </tr>
+                    <RealtimeTableRow
+                      key={`${r.symbol}-${r.expiry}-${r.strike_price}-${r.option_type}-${idx}`}
+                      row={r}
+                      rowKey={`${r.symbol}-${r.expiry}-${r.strike_price}-${r.option_type}-${idx}`}
+                      td={td}
+                    />
                   ))
                 ) : (
                   <tr>
@@ -451,7 +646,7 @@ export default function Dashboard() {
                 <button
                   type="button"
                   disabled={safeTablePage <= 1}
-                  onClick={() => setTablePage((p) => Math.max(1, p - 1))}
+                  onClick={goPrevPage}
                   className="rounded border border-[var(--line)] px-2 py-1 text-[var(--fg)] disabled:opacity-40"
                 >
                   Prev
@@ -459,7 +654,7 @@ export default function Dashboard() {
                 <button
                   type="button"
                   disabled={safeTablePage >= tablePageCount}
-                  onClick={() => setTablePage((p) => Math.min(tablePageCount, p + 1))}
+                  onClick={goNextPage}
                   className="rounded border border-[var(--line)] px-2 py-1 text-[var(--fg)] disabled:opacity-40"
                 >
                   Next
@@ -469,7 +664,7 @@ export default function Dashboard() {
           ) : null}
         </div>
 
-        <aside className="flex w-full shrink-0 flex-col gap-3 lg:w-80">
+        <aside className="flex w-full shrink-0 flex-col gap-3 lg:sticky lg:top-3 lg:h-[calc(100dvh-1.5rem)] lg:w-80 lg:overflow-y-auto">
           <section className="rounded-lg border border-[var(--line)] bg-[var(--card)] p-3">
             <div className="text-[10px] uppercase tracking-wide text-[var(--muted)]">
               Health
@@ -536,6 +731,9 @@ export default function Dashboard() {
               placeholder="Search symbol..."
               className="mt-2 w-full rounded border border-[var(--line)] bg-[var(--bg)] px-2 py-1.5 text-xs text-[var(--fg)] outline-none focus:border-white/40"
             />
+            {deferredSymbolQuery !== symbolQuery ? (
+              <div className="mt-1 text-[10px] text-[var(--muted)]">Filtering...</div>
+            ) : null}
             <div className="mt-2 flex flex-wrap gap-1.5">
               {filesErr ? (
                 <span className={`text-xs ${filesErr === "Not authorized" ? "text-red-400" : "text-[var(--muted)]"}`}>
@@ -608,33 +806,189 @@ export default function Dashboard() {
               CSV
             </div>
             <div className="mt-2 flex flex-col gap-2">
+              <div className="grid grid-cols-2 gap-2">
+                <button
+                  type="button"
+                  disabled={isAnyDownloadRunning}
+                  onClick={() => void runQuickPreset("singleDay")}
+                  className="rounded border border-[var(--line)] px-2 py-1.5 text-xs text-[var(--fg)] hover:border-white/30 disabled:opacity-50"
+                >
+                  Quick Day
+                </button>
+                <button
+                  type="button"
+                  disabled={isAnyDownloadRunning}
+                  onClick={() => void runQuickPreset("singleWeek")}
+                  className="rounded border border-[var(--line)] px-2 py-1.5 text-xs text-[var(--fg)] hover:border-white/30 disabled:opacity-50"
+                >
+                  Quick Week
+                </button>
+                <button
+                  type="button"
+                  disabled={isAnyDownloadRunning}
+                  onClick={() => void runQuickPreset("singleMonth")}
+                  className="rounded border border-[var(--line)] px-2 py-1.5 text-xs text-[var(--fg)] hover:border-white/30 disabled:opacity-50"
+                >
+                  Quick Month
+                </button>
+                <button
+                  type="button"
+                  disabled={isAnyDownloadRunning}
+                  onClick={() => void runQuickPreset("allDay")}
+                  className="rounded border border-[var(--line)] px-2 py-1.5 text-xs text-[var(--fg)] hover:border-white/30 disabled:opacity-50"
+                >
+                  All Symbols Day
+                </button>
+              </div>
+              <div className="grid grid-cols-3 gap-2">
+                <button
+                  type="button"
+                  onClick={() => setDownloadScope("single")}
+                  className={`rounded border px-2 py-1 text-xs ${
+                    downloadScope === "single"
+                      ? "border-white/40 bg-white text-black"
+                      : "border-[var(--line)] text-[var(--muted)]"
+                  }`}
+                >
+                  Symbol
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setDownloadScope("allSymbols")}
+                  className={`rounded border px-2 py-1 text-xs ${
+                    downloadScope === "allSymbols"
+                      ? "border-white/40 bg-white text-black"
+                      : "border-[var(--line)] text-[var(--muted)]"
+                  }`}
+                >
+                  All Symbols
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setDownloadScope("fullExport")}
+                  className={`rounded border px-2 py-1 text-xs ${
+                    downloadScope === "fullExport"
+                      ? "border-white/40 bg-white text-black"
+                      : "border-[var(--line)] text-[var(--muted)]"
+                  }`}
+                >
+                  Full Export
+                </button>
+              </div>
+              {downloadScope !== "fullExport" ? (
+                <div className="grid grid-cols-3 gap-2">
+                  {(["day", "week", "month"] as const).map((period) => (
+                    <button
+                      key={period}
+                      type="button"
+                      onClick={() => setDownloadPeriod(period)}
+                      className={`rounded border px-2 py-1 text-xs uppercase ${
+                        downloadPeriod === period
+                          ? "border-white/40 bg-white text-black"
+                          : "border-[var(--line)] text-[var(--muted)]"
+                      }`}
+                    >
+                      {period}
+                    </button>
+                  ))}
+                </div>
+              ) : null}
+              <div className="rounded border border-[var(--line)] bg-[var(--bg)] px-2 py-1.5 text-[11px] text-[var(--muted)]">
+                {downloadSummary}
+              </div>
+              {isAnyDownloadRunning ? (
+                <div className="rounded border border-emerald-500/30 bg-emerald-500/10 px-2 py-1 text-xs text-emerald-300">
+                  {activeDownloadLabel}
+                </div>
+              ) : null}
               <button
                 type="button"
-                disabled={!selectedDate || !symbol || downloadState.day}
-                onClick={() => void runDownload("day")}
+                disabled={
+                  isAnyDownloadRunning ||
+                  (downloadScope !== "fullExport" && !selectedDate) ||
+                  (downloadScope === "single" && !symbol) ||
+                  (downloadScope === "fullExport" &&
+                    fullExportMode === "range" &&
+                    (!rangeStartDate || !rangeEndDate))
+                }
+                onClick={() => void runPrimaryDownload()}
                 className="rounded border border-white/30 bg-white px-3 py-2 text-center text-xs font-medium text-black transition hover:bg-neutral-200 disabled:cursor-not-allowed disabled:opacity-50"
               >
-                {downloadState.day ? "Preparing day CSV..." : "Download day CSV"}
+                {isAnyDownloadRunning
+                  ? activeDownloadLabel
+                  : downloadScope === "fullExport"
+                    ? "Download Full Export ZIP"
+                    : `Download ${downloadScope === "allSymbols" ? "All Symbols" : symbol} ${downloadPeriod.toUpperCase()}`}
               </button>
-              <button
-                type="button"
-                disabled={!symbol || downloadState.week}
-                onClick={() => void runDownload("week")}
-                className="rounded border border-[var(--line)] px-3 py-2 text-center text-xs text-[var(--fg)] transition hover:border-white/30 disabled:cursor-not-allowed disabled:opacity-50"
-              >
-                {downloadState.week ? "Preparing week ZIP..." : "Download week ZIP"}
-              </button>
-              <button
-                type="button"
-                disabled={!symbol || downloadState.month}
-                onClick={() => void runDownload("month")}
-                className="rounded border border-[var(--line)] px-3 py-2 text-center text-xs text-[var(--fg)] transition hover:border-white/30 disabled:cursor-not-allowed disabled:opacity-50"
-              >
-                {downloadState.month ? "Preparing month ZIP..." : "Download month ZIP"}
-              </button>
-              <div className="text-[10px] text-[var(--muted)]">
-                {selectedExpiry ? `Filtered by ${selectedExpiry}` : "All expiries included"}
-              </div>
+              {downloadScope === "fullExport" ? (
+                <div className="mt-1 border-t border-[var(--line)] pt-2">
+                  <div className="mb-2 text-[10px] uppercase tracking-wide text-[var(--muted)]">
+                    Full Export ZIP
+                  </div>
+                  <div className="mb-2 flex gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setFullExportMode("date")}
+                      className={`flex-1 rounded border px-2 py-1 text-xs ${
+                        fullExportMode === "date"
+                          ? "border-white/40 bg-white text-black"
+                          : "border-[var(--line)] text-[var(--muted)]"
+                      }`}
+                    >
+                      Single Date
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setFullExportMode("range")}
+                      className={`flex-1 rounded border px-2 py-1 text-xs ${
+                        fullExportMode === "range"
+                          ? "border-white/40 bg-white text-black"
+                          : "border-[var(--line)] text-[var(--muted)]"
+                      }`}
+                    >
+                      Date Range
+                    </button>
+                  </div>
+                  {fullExportMode === "range" ? (
+                    <div className="mb-2 flex gap-2">
+                      <input
+                        value={rangeStartDate}
+                        onChange={(e) => setRangeStartDate(e.target.value)}
+                        placeholder="Start YYYY-MM-DD"
+                        className="w-1/2 rounded border border-[var(--line)] bg-[var(--bg)] px-2 py-1 text-xs text-[var(--fg)]"
+                      />
+                      <input
+                        value={rangeEndDate}
+                        onChange={(e) => setRangeEndDate(e.target.value)}
+                        placeholder="End YYYY-MM-DD"
+                        className="w-1/2 rounded border border-[var(--line)] bg-[var(--bg)] px-2 py-1 text-xs text-[var(--fg)]"
+                      />
+                    </div>
+                  ) : null}
+                  <input
+                    value={customSymbols}
+                    onChange={(e) => setCustomSymbols(e.target.value)}
+                    placeholder="ALL or NIFTY,BANKNIFTY"
+                    className="mb-2 w-full rounded border border-[var(--line)] bg-[var(--bg)] px-2 py-1 text-xs text-[var(--fg)]"
+                  />
+                  <label className="mb-2 flex items-center gap-2 text-xs text-[var(--muted)]">
+                    <input
+                      type="checkbox"
+                      checked={splitByExpiry}
+                      onChange={(e) => setSplitByExpiry(e.target.checked)}
+                    />
+                    Split by expiry
+                  </label>
+                </div>
+              ) : (
+                <div className="text-[10px] text-[var(--muted)]">
+                  {downloadScope === "allSymbols"
+                    ? "All symbols mode ignores expiry filter"
+                    : selectedExpiry
+                      ? `Filtered by ${selectedExpiry}`
+                      : "All expiries included"}
+                </div>
+              )}
               {downloadErr ? (
                 <div className={`text-xs ${downloadErr === "Not authorized" ? "text-red-400" : "text-[var(--muted)]"}`}>
                   {downloadErr}
