@@ -4,6 +4,7 @@ import { memo, useCallback, useDeferredValue, useEffect, useMemo, useState } fro
 import {
   type ExpiriesResponse,
   fetchNseiJson,
+  nseiDownloadAllUrl,
   nseiDownloadUrl,
   type DatesResponse,
   type FilesResponse,
@@ -317,20 +318,19 @@ export default function Dashboard() {
     try {
       const activeSymbol = bundle ? "ALL" : symbol;
       const activeExpiry = bundle ? undefined : selectedExpiry || undefined;
-      const url =
-        period === "day"
-          ? nseiDownloadUrl("range", {
-              symbol: activeSymbol,
-              period: "day",
-              anchor_date: selectedDate || undefined,
-              expiry: activeExpiry,
-            })
-          : nseiDownloadUrl("range", {
-              symbol: activeSymbol,
-              period,
-              anchor_date: selectedDate || undefined,
-              expiry: activeExpiry,
-            });
+      const url = bundle
+        ? nseiDownloadAllUrl({
+            period,
+            anchor_date: selectedDate || undefined,
+            symbols: "ALL",
+            split_by_expiry: false,
+          })
+        : nseiDownloadUrl("range", {
+            symbol: activeSymbol,
+            period,
+            anchor_date: selectedDate || undefined,
+            expiry: activeExpiry,
+          });
       const res = await fetch(url, { cache: "no-store" });
       if (!res.ok) {
         const body = await res.text();
